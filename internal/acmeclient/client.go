@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 
 	acp "github.com/coder/acp-go-sdk"
@@ -19,6 +21,8 @@ type acmeClient struct {
 	promptMu  sync.Mutex
 	inputBuf  []byte
 	terminals terminalMap
+	permMu    sync.Mutex // guards permCh
+	permCh    chan string // non-nil while RequestPermission is waiting
 }
 
 // Run creates an acme window, spawns the agent, and runs the event loop.
@@ -82,7 +86,9 @@ func Run(ctx context.Context, agentArgs []string) error {
 			if len(c.inputBuf) > 0 && c.inputBuf[len(c.inputBuf)-1] == '\n' {
 				text := string(c.inputBuf[:len(c.inputBuf)-1])
 				c.inputBuf = c.inputBuf[:0]
-				go c.prompt(ctx, conn, text)
+				if !c.takePermInput(text) {
+					go c.prompt(ctx, conn, text)
+				}
 			}
 		case e.C2 == 'x' || e.C2 == 'X':
 			if string(e.Text) == "Del" {
@@ -108,6 +114,24 @@ func (c *acmeClient) prompt(ctx context.Context, conn *acp.ClientSideConnection,
 		return
 	}
 	c.appendLine("\n")
+}
+
+func (c *acmeClient) setPermCh(ch chan string) {
+	c.permMu.Lock()
+	defer c.permMu.Unlock()
+	c.permCh = ch
+}
+
+// takePermInput delivers line to the pending permission channel if one exists.
+// Returns true if consumed, false if normal prompt dispatch should proceed.
+func (c *acmeClient) takePermInput(line string) bool {
+	c.permMu.Lock()
+	defer c.permMu.Unlock()
+	if c.permCh == nil {
+		return false
+	}
+	c.permCh <- line
+	return true
 }
 
 func (c *acmeClient) appendLine(s string) {
@@ -145,28 +169,43 @@ func truncate(s string, n int) string {
 	return s[:n] + "..."
 }
 
-// RequestPermission auto-approves all permission requests by selecting the first allow option.
+// RequestPermission displays the permission options and waits for the user to choose one.
 func (c *acmeClient) RequestPermission(ctx context.Context, p acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
 	title := ""
 	if p.ToolCall.Title != nil {
 		title = *p.ToolCall.Title
 	}
-	c.appendLine("[permission: " + title + " — approved]\n")
 
-	// Select the first "allow" option, or the first option if none match.
-	var selected acp.PermissionOptionId
-	for _, opt := range p.Options {
-		if opt.Kind == acp.PermissionOptionKindAllowOnce || opt.Kind == acp.PermissionOptionKindAllowAlways {
-			selected = opt.OptionId
-			break
+	var sb strings.Builder
+	sb.WriteString("[permission: " + title + "]\n")
+	for i, opt := range p.Options {
+		sb.WriteString(fmt.Sprintf("  %d. %s\n", i+1, opt.Name))
+	}
+	sb.WriteString("Enter number: ")
+	c.appendLine(sb.String())
+
+	ch := make(chan string, 1)
+	c.setPermCh(ch)
+	defer c.setPermCh(nil)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return acp.RequestPermissionResponse{
+				Outcome: acp.NewRequestPermissionOutcomeCancelled(),
+			}, nil
+		case line := <-ch:
+			n, err := strconv.Atoi(strings.TrimSpace(line))
+			if err != nil || n < 1 || n > len(p.Options) {
+				c.appendLine(fmt.Sprintf("[invalid — enter 1–%d]: ", len(p.Options)))
+				continue
+			}
+			c.appendLine(fmt.Sprintf("[permission: %q selected]\n", p.Options[n-1].Name))
+			return acp.RequestPermissionResponse{
+				Outcome: acp.NewRequestPermissionOutcomeSelected(p.Options[n-1].OptionId),
+			}, nil
 		}
 	}
-	if selected == "" && len(p.Options) > 0 {
-		selected = p.Options[0].OptionId
-	}
-	return acp.RequestPermissionResponse{
-		Outcome: acp.NewRequestPermissionOutcomeSelected(selected),
-	}, nil
 }
 
 // WriteTextFile writes to a file.
