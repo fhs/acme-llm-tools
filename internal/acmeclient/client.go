@@ -62,7 +62,8 @@ func Run(ctx context.Context, agentArgs []string) error {
 		return fmt.Errorf("ACP initialize: %w", err)
 	}
 	sessResp, err := conn.NewSession(ctx, acp.NewSessionRequest{
-		Cwd: cwd,
+		Cwd:        cwd,
+		McpServers: []acp.McpServer{},
 	})
 	if err != nil {
 		return fmt.Errorf("ACP new session: %w", err)
