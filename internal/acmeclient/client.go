@@ -175,33 +175,38 @@ func (c *acmeClient) SessionUpdate(ctx context.Context, n acp.SessionNotificatio
 	u := n.Update
 	switch {
 	case u.AgentMessageChunk != nil:
-		c.closeThought()
 		content := u.AgentMessageChunk.Content
 		if content.Text != nil {
-			c.appendLine(content.Text.Text)
+			c.writeMu.Lock()
+			if c.inThought {
+				c.win.Write("body", []byte("]\n"))
+				c.inThought = false
+			}
+			c.win.Write("body", []byte(content.Text.Text))
+			c.writeMu.Unlock()
 		}
 	case u.AgentThoughtChunk != nil:
 		content := u.AgentThoughtChunk.Content
 		if content.Text != nil && content.Text.Text != "" {
+			c.writeMu.Lock()
 			if !c.inThought {
-				c.appendLine("[thought: ")
+				c.win.Write("body", []byte("[thought: "))
 				c.inThought = true
 			}
-			c.appendLine(content.Text.Text)
+			c.win.Write("body", []byte(content.Text.Text))
+			c.writeMu.Unlock()
 		}
 	case u.ToolCall != nil:
-		c.closeThought()
 		tc := u.ToolCall
-		c.appendLine("[tool: " + tc.Title + "]\n")
+		c.writeMu.Lock()
+		if c.inThought {
+			c.win.Write("body", []byte("]\n"))
+			c.inThought = false
+		}
+		c.win.Write("body", []byte("[tool: "+tc.Title+"]\n"))
+		c.writeMu.Unlock()
 	}
 	return nil
-}
-
-func (c *acmeClient) closeThought() {
-	if c.inThought {
-		c.appendLine("]\n")
-		c.inThought = false
-	}
 }
 
 // RequestPermission displays the permission options and waits for the user to choose one.
