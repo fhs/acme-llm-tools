@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"os"
 
@@ -9,11 +10,13 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: acme-acp <agent> [args...]")
+	trace := flag.Bool("rpc.trace", false, "print RPC trace to stderr")
+	flag.Parse()
+	if flag.NArg() < 1 {
+		fmt.Fprintln(os.Stderr, "usage: acme-acp [-rpc.trace] <agent> [args...]")
 		os.Exit(1)
 	}
-	if err := acmeclient.Run(context.Background(), os.Args[1:]); err != nil {
+	if err := acmeclient.Run(context.Background(), flag.Args(), *trace); err != nil {
 		fmt.Fprintln(os.Stderr, "acme-acp:", err)
 		os.Exit(1)
 	}

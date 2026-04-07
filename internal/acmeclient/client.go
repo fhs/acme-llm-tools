@@ -3,6 +3,7 @@ package acmeclient
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,8 +27,29 @@ type acmeClient struct {
 	inThought bool        // true while streaming a thought block
 }
 
+// traceWriter wraps an io.WriteCloser and logs each write to stderr.
+type traceWriter struct {
+	io.WriteCloser
+}
+
+func (w *traceWriter) Write(p []byte) (int, error) {
+	fmt.Fprintf(os.Stderr, "→ %s", p)
+	return w.WriteCloser.Write(p)
+}
+
+// prefixWriter logs writes to an underlying writer with a prefix on each line.
+type prefixWriter struct {
+	w      io.Writer
+	prefix string
+}
+
+func (w *prefixWriter) Write(p []byte) (int, error) {
+	fmt.Fprintf(w.w, "%s%s", w.prefix, p)
+	return len(p), nil
+}
+
 // Run creates an acme window, spawns the agent, and runs the event loop.
-func Run(ctx context.Context, agentArgs []string) error {
+func Run(ctx context.Context, agentArgs []string, trace bool) error {
 	w, err := acme.New()
 	if err != nil {
 		return fmt.Errorf("open acme window: %w", err)
@@ -49,6 +71,7 @@ func Run(ctx context.Context, agentArgs []string) error {
 	if err != nil {
 		return fmt.Errorf("agent stdout pipe: %w", err)
 	}
+	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start agent: %w", err)
 	}
@@ -57,7 +80,13 @@ func Run(ctx context.Context, agentArgs []string) error {
 		_ = cmd.Wait()
 	}()
 
-	conn := acp.NewClientSideConnection(c, agentStdin, agentStdout)
+	var connWriter io.Writer = agentStdin
+	var connReader io.Reader = agentStdout
+	if trace {
+		connWriter = &traceWriter{agentStdin}
+		connReader = io.TeeReader(agentStdout, &prefixWriter{w: os.Stderr, prefix: "← "})
+	}
+	conn := acp.NewClientSideConnection(c, connWriter, connReader)
 
 	cwd, _ := os.Getwd()
 	_, err = conn.Initialize(ctx, acp.InitializeRequest{
