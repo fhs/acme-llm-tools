@@ -10,8 +10,8 @@ import (
 	"strings"
 	"sync"
 
-	acp "github.com/coder/acp-go-sdk"
 	"9fans.net/go/acme"
+	acp "github.com/coder/acp-go-sdk"
 )
 
 type acmeClient struct {
@@ -21,8 +21,9 @@ type acmeClient struct {
 	promptMu  sync.Mutex
 	inputBuf  []byte
 	terminals terminalMap
-	permMu    sync.Mutex // guards permCh
+	permMu    sync.Mutex  // guards permCh
 	permCh    chan string // non-nil while RequestPermission is waiting
+	inThought bool        // true while streaming a thought block
 }
 
 // Run creates an acme window, spawns the agent, and runs the event loop.
@@ -145,28 +146,33 @@ func (c *acmeClient) SessionUpdate(ctx context.Context, n acp.SessionNotificatio
 	u := n.Update
 	switch {
 	case u.AgentMessageChunk != nil:
+		c.closeThought()
 		content := u.AgentMessageChunk.Content
 		if content.Text != nil {
 			c.appendLine(content.Text.Text)
 		}
 	case u.AgentThoughtChunk != nil:
-		// Thoughts: show abbreviated.
 		content := u.AgentThoughtChunk.Content
 		if content.Text != nil && content.Text.Text != "" {
-			c.appendLine("[thought: " + truncate(content.Text.Text, 80) + "]\n")
+			if !c.inThought {
+				c.appendLine("[thought: ")
+				c.inThought = true
+			}
+			c.appendLine(content.Text.Text)
 		}
 	case u.ToolCall != nil:
+		c.closeThought()
 		tc := u.ToolCall
 		c.appendLine("[tool: " + tc.Title + "]\n")
 	}
 	return nil
 }
 
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
+func (c *acmeClient) closeThought() {
+	if c.inThought {
+		c.appendLine("]\n")
+		c.inThought = false
 	}
-	return s[:n] + "..."
 }
 
 // RequestPermission displays the permission options and waits for the user to choose one.
