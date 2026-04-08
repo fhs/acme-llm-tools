@@ -16,15 +16,16 @@ import (
 )
 
 type acmeClient struct {
-	win       *acme.Win
-	sessionID acp.SessionId
-	writeMu   sync.Mutex
-	promptMu  sync.Mutex
-	inputBuf  []byte
-	terminals terminalMap
-	permMu    sync.Mutex  // guards permCh
-	permCh    chan string // non-nil while RequestPermission is waiting
-	inThought bool        // true while streaming a thought block
+	win          *acme.Win
+	sessionID    acp.SessionId
+	writeMu      sync.Mutex
+	promptMu     sync.Mutex
+	promptWin    *acme.Win
+	promptWinMu  sync.Mutex // guards promptWin
+	terminals    terminalMap
+	permMu       sync.Mutex // guards permCh
+	permCh       chan string // non-nil while RequestPermission is waiting
+	inThought    bool       // true while streaming a thought block
 }
 
 // traceWriter wraps an io.WriteCloser and logs each write to stderr.
@@ -56,6 +57,7 @@ func Run(ctx context.Context, agentArgs []string, trace bool) error {
 	}
 	agentName := filepath.Base(agentArgs[0])
 	w.Name("+Acme/AI")
+	w.Write("tag", []byte("Prompt"))
 	w.Ctl("clean")
 
 	c := &acmeClient{win: w}
@@ -110,26 +112,83 @@ func Run(ctx context.Context, agentArgs []string, trace bool) error {
 			break
 		}
 		switch {
-		case e.C1 == 'K' && e.C2 == 'I':
-			// Keyboard insert.
-			c.inputBuf = append(c.inputBuf, e.Text...)
-			if len(c.inputBuf) > 0 && c.inputBuf[len(c.inputBuf)-1] == '\n' {
-				text := string(c.inputBuf[:len(c.inputBuf)-1])
-				c.inputBuf = c.inputBuf[:0]
-				if !c.takePermInput(text) {
-					go c.prompt(ctx, conn, text)
-				}
-			}
 		case e.C2 == 'x' || e.C2 == 'X':
-			if string(e.Text) == "Del" {
+			switch string(e.Text) {
+			case "Del":
 				return nil
+			case "Prompt":
+				go c.openPromptWindow(ctx, conn)
+			default:
+				w.WriteEvent(e)
 			}
-			w.WriteEvent(e)
 		case e.C2 == 'l' || e.C2 == 'L':
-			w.WriteEvent(e)
+			if !c.takePermInput(strings.TrimSpace(string(e.Text))) {
+				w.WriteEvent(e)
+			}
 		}
 	}
 	return nil
+}
+
+func (c *acmeClient) openPromptWindow(ctx context.Context, conn *acp.ClientSideConnection) {
+	c.promptWinMu.Lock()
+	if c.promptWin != nil {
+		c.promptWin.Ctl("show")
+		c.promptWinMu.Unlock()
+		return
+	}
+	pw, err := acme.New()
+	if err != nil {
+		c.appendLine("[error: could not open prompt window: " + err.Error() + "]\n")
+		c.promptWinMu.Unlock()
+		return
+	}
+	pw.Name("+Acme/AI/prompt")
+	pw.Write("tag", []byte("Send"))
+	pw.Ctl("clean")
+	c.promptWin = pw
+	c.promptWinMu.Unlock()
+
+	c.runPromptWindow(ctx, conn, pw)
+
+	c.promptWinMu.Lock()
+	c.promptWin = nil
+	c.promptWinMu.Unlock()
+}
+
+func (c *acmeClient) runPromptWindow(ctx context.Context, conn *acp.ClientSideConnection, pw *acme.Win) {
+	for e := range pw.EventChan() {
+		if e == nil {
+			break
+		}
+		switch {
+		case (e.C2 == 'x' || e.C2 == 'X') && string(e.Text) == "Send":
+			body, err := pw.ReadAll("body")
+			if err != nil {
+				c.appendLine("[error: reading prompt window: " + err.Error() + "]\n")
+				continue
+			}
+			text := strings.TrimRight(string(body), "\n")
+			if text == "" {
+				continue
+			}
+			// Copy prompt to main window.
+			c.appendLine("> " + strings.ReplaceAll(text, "\n", "\n> ") + "\n")
+			// Clear the prompt window body.
+			pw.Addr(",")
+			pw.Write("data", []byte(""))
+			pw.Ctl("clean")
+			// Send to agent.
+			go c.prompt(ctx, conn, text)
+		case (e.C2 == 'x' || e.C2 == 'X') && string(e.Text) == "Del":
+			pw.Del(true)
+			return
+		case e.C2 == 'x' || e.C2 == 'X':
+			pw.WriteEvent(e)
+		case e.C2 == 'l' || e.C2 == 'L':
+			pw.WriteEvent(e)
+		}
+	}
 }
 
 func (c *acmeClient) prompt(ctx context.Context, conn *acp.ClientSideConnection, text string) {
@@ -152,15 +211,15 @@ func (c *acmeClient) setPermCh(ch chan string) {
 	c.permCh = ch
 }
 
-// takePermInput delivers line to the pending permission channel if one exists.
-// Returns true if consumed, false if normal prompt dispatch should proceed.
-func (c *acmeClient) takePermInput(line string) bool {
+// takePermInput delivers word to the pending permission channel if one exists.
+// Returns true if consumed, false if the event should be forwarded to acme.
+func (c *acmeClient) takePermInput(word string) bool {
 	c.permMu.Lock()
 	defer c.permMu.Unlock()
 	if c.permCh == nil {
 		return false
 	}
-	c.permCh <- line
+	c.permCh <- word
 	return true
 }
 
@@ -219,9 +278,8 @@ func (c *acmeClient) RequestPermission(ctx context.Context, p acp.RequestPermiss
 	var sb strings.Builder
 	sb.WriteString("[permission: " + title + "]\n")
 	for i, opt := range p.Options {
-		sb.WriteString(fmt.Sprintf("  %d. %s\n", i+1, opt.Name))
+		sb.WriteString(fmt.Sprintf("  %d/ %s\n", i+1, opt.Name))
 	}
-	sb.WriteString("Enter number: ")
 	c.appendLine(sb.String())
 
 	ch := make(chan string, 1)
@@ -234,10 +292,9 @@ func (c *acmeClient) RequestPermission(ctx context.Context, p acp.RequestPermiss
 			return acp.RequestPermissionResponse{
 				Outcome: acp.NewRequestPermissionOutcomeCancelled(),
 			}, nil
-		case line := <-ch:
-			n, err := strconv.Atoi(strings.TrimSpace(line))
+		case word := <-ch:
+			n, err := strconv.Atoi(strings.TrimSpace(word))
 			if err != nil || n < 1 || n > len(p.Options) {
-				c.appendLine(fmt.Sprintf("[invalid — enter 1–%d]: ", len(p.Options)))
 				continue
 			}
 			c.appendLine(fmt.Sprintf("[permission: %q selected]\n", p.Options[n-1].Name))
