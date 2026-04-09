@@ -29,6 +29,8 @@ type acmeClient struct {
 	inThought    bool       // true while streaming a thought block
 	modesMu      sync.Mutex // guards modeState
 	modeState    *acp.SessionModeState
+	modelsMu     sync.Mutex // guards modelState
+	modelState   *acp.SessionModelState
 }
 
 // traceWriter wraps an io.WriteCloser and logs each write to stderr.
@@ -125,6 +127,9 @@ func Run(ctx context.Context, agentArgs []string, trace bool, resume string) err
 		if loadResp.Modes != nil {
 			c.modeState = loadResp.Modes
 		}
+		if loadResp.Models != nil {
+			c.modelState = loadResp.Models
+		}
 	} else {
 		sessResp, err := conn.NewSession(ctx, acp.NewSessionRequest{
 			Cwd:        cwd,
@@ -137,6 +142,9 @@ func Run(ctx context.Context, agentArgs []string, trace bool, resume string) err
 		if sessResp.Modes != nil {
 			c.modeState = sessResp.Modes
 		}
+		if sessResp.Models != nil {
+			c.modelState = sessResp.Models
+		}
 	}
 	c.sessionID = sessID
 	c.agentName = agentName
@@ -146,6 +154,9 @@ func Run(ctx context.Context, agentArgs []string, trace bool, resume string) err
 	w.Write("tag", []byte("Prompt"))
 	if c.modeState != nil {
 		w.Write("tag", []byte(" Mode"))
+	}
+	if c.modelState != nil {
+		w.Write("tag", []byte(" Model"))
 	}
 	w.Ctl("clean")
 
@@ -179,6 +190,8 @@ func Run(ctx context.Context, agentArgs []string, trace bool, resume string) err
 				go c.openPromptWindow(ctx, conn)
 			case "Mode":
 				c.printModes()
+			case "Model":
+				c.printModels()
 			default:
 				w.WriteEvent(e)
 			}
@@ -188,6 +201,8 @@ func Run(ctx context.Context, agentArgs []string, trace bool, resume string) err
 				// consumed by permission handler
 			} else if id, ok := c.modeByToken(word); ok {
 				go c.setMode(ctx, conn, id)
+			} else if id, ok := c.modelByToken(word); ok {
+				go c.setModel(ctx, conn, id)
 			} else {
 				w.WriteEvent(e)
 			}
@@ -397,7 +412,7 @@ func (c *acmeClient) printModes() {
 		if m.Description != nil {
 			label = m.Name + ": " + *m.Description
 		}
-		sb.WriteString(fmt.Sprintf("  %sm%d\t%s\n", marker, i+1, label))
+		sb.WriteString(fmt.Sprintf("  %smode%d\t%s\n", marker, i+1, label))
 	}
 	c.appendLine(sb.String())
 }
@@ -420,7 +435,7 @@ func (c *acmeClient) modeNameByID(id acp.SessionModeId) string {
 // modeByToken parses an "m<n>" token and returns the corresponding mode ID.
 func (c *acmeClient) modeByToken(word string) (acp.SessionModeId, bool) {
 	var n int
-	if _, err := fmt.Sscanf(word, "m%d", &n); err != nil {
+	if _, err := fmt.Sscanf(word, "mode%d", &n); err != nil {
 		return "", false
 	}
 	c.modesMu.Lock()
@@ -445,6 +460,74 @@ func (c *acmeClient) setMode(ctx context.Context, conn *acp.ClientSideConnection
 	}
 	c.modesMu.Unlock()
 	c.appendLine("[mode: " + c.modeNameByID(id) + "]\n")
+}
+
+func (c *acmeClient) printModels() {
+	c.modelsMu.Lock()
+	ms := c.modelState
+	c.modelsMu.Unlock()
+	if ms == nil {
+		return
+	}
+	var sb strings.Builder
+	sb.WriteString("[models: current=" + c.modelNameByID(ms.CurrentModelId) + "]\n")
+	for i, m := range ms.AvailableModels {
+		marker := "  "
+		if m.ModelId == ms.CurrentModelId {
+			marker = "* "
+		}
+		label := m.Name
+		if m.Description != nil {
+			label = m.Name + ": " + *m.Description
+		}
+		sb.WriteString(fmt.Sprintf("  %smodel%d\t%s\n", marker, i+1, label))
+	}
+	c.appendLine(sb.String())
+}
+
+// modelNameByID returns the human-readable name for a model ID, falling back to the raw ID string.
+// Must NOT be called with modelsMu held.
+func (c *acmeClient) modelNameByID(id acp.ModelId) string {
+	c.modelsMu.Lock()
+	defer c.modelsMu.Unlock()
+	if c.modelState != nil {
+		for _, m := range c.modelState.AvailableModels {
+			if m.ModelId == id {
+				return m.Name
+			}
+		}
+	}
+	return string(id)
+}
+
+// modelByToken parses a "model<n>" token and returns the corresponding model ID.
+func (c *acmeClient) modelByToken(word string) (acp.ModelId, bool) {
+	var n int
+	if _, err := fmt.Sscanf(word, "model%d", &n); err != nil {
+		return "", false
+	}
+	c.modelsMu.Lock()
+	defer c.modelsMu.Unlock()
+	if c.modelState == nil || n < 1 || n > len(c.modelState.AvailableModels) {
+		return "", false
+	}
+	return c.modelState.AvailableModels[n-1].ModelId, true
+}
+
+func (c *acmeClient) setModel(ctx context.Context, conn *acp.ClientSideConnection, id acp.ModelId) {
+	if _, err := conn.SetSessionModel(ctx, acp.SetSessionModelRequest{
+		SessionId: c.sessionID,
+		ModelId:   id,
+	}); err != nil {
+		c.appendLine("[error: set model: " + err.Error() + "]\n")
+		return
+	}
+	c.modelsMu.Lock()
+	if c.modelState != nil {
+		c.modelState.CurrentModelId = id
+	}
+	c.modelsMu.Unlock()
+	c.appendLine("[model: " + c.modelNameByID(id) + "]\n")
 }
 
 // WriteTextFile writes to a file.
