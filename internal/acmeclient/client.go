@@ -17,21 +17,21 @@ import (
 )
 
 type acmeClient struct {
-	win         *acme.Win
-	agentName   string
-	sessionID   acp.SessionId
-	writeMu     sync.Mutex
-	promptMu    sync.Mutex
-	promptWin   *acme.Win
-	promptWinMu sync.Mutex // guards promptWin
-	terminals   terminalMap
-	permMu      sync.Mutex  // guards permCh
-	permCh      chan string // non-nil while RequestPermission is waiting
-	inThought   bool        // true while streaming a thought block
-	modesMu     sync.Mutex  // guards modeState
-	modeState   *acp.SessionModeState
-	modelsMu    sync.Mutex // guards modelState
-	modelState  *acp.SessionModelState
+	win          *acme.Win
+	agentName    string
+	sessionID    acp.SessionId
+	writeMu      sync.Mutex
+	promptMu     sync.Mutex
+	promptWin    *acme.Win
+	promptWinMu  sync.Mutex // guards promptWin
+	terminals    terminalMap
+	permMu       sync.Mutex  // guards permCh
+	permCh       chan string // non-nil while RequestPermission is waiting
+	inThought    bool        // true while streaming a thought block
+	modesMu      sync.Mutex  // guards modeState
+	modeState    *acp.SessionModeState
+	modelsMu     sync.Mutex // guards modelState
+	modelState   *acp.SessionModelState
 }
 
 // traceWriter wraps an io.WriteCloser and logs each write to stderr.
@@ -152,7 +152,7 @@ func Run(ctx context.Context, agentArgs []string, trace bool, resume string) err
 
 	// Name the window and set up the tag now that we have the session ID.
 	w.Name("+Acme/%s/%s", agentName, sessID)
-	w.Write("tag", []byte("Prompt"))
+	w.Write("tag", []byte("Prompt Cancel"))
 	if c.modeState != nil {
 		w.Write("tag", []byte(" Mode"))
 	}
@@ -193,6 +193,10 @@ func Run(ctx context.Context, agentArgs []string, trace bool, resume string) err
 				c.printModes()
 			case "Model":
 				c.printModels()
+			case "Cancel":
+				go func() {
+					_ = conn.Cancel(ctx, acp.CancelNotification{SessionId: c.sessionID})
+				}()
 			default:
 				w.WriteEvent(e)
 			}
@@ -276,6 +280,7 @@ func (c *acmeClient) runPromptWindow(ctx context.Context, conn *acp.ClientSideCo
 func (c *acmeClient) prompt(ctx context.Context, conn *acp.ClientSideConnection, text string) {
 	c.promptMu.Lock()
 	defer c.promptMu.Unlock()
+
 	_, err := conn.Prompt(ctx, acp.PromptRequest{
 		SessionId: c.sessionID,
 		Prompt:    []acp.ContentBlock{acp.TextBlock(text)},
