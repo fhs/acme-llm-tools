@@ -2,6 +2,7 @@ package acmeclient
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -16,21 +17,21 @@ import (
 )
 
 type acmeClient struct {
-	win          *acme.Win
-	agentName    string
-	sessionID    acp.SessionId
-	writeMu      sync.Mutex
-	promptMu     sync.Mutex
-	promptWin    *acme.Win
-	promptWinMu  sync.Mutex // guards promptWin
-	terminals    terminalMap
-	permMu       sync.Mutex // guards permCh
-	permCh       chan string // non-nil while RequestPermission is waiting
-	inThought    bool       // true while streaming a thought block
-	modesMu      sync.Mutex // guards modeState
-	modeState    *acp.SessionModeState
-	modelsMu     sync.Mutex // guards modelState
-	modelState   *acp.SessionModelState
+	win         *acme.Win
+	agentName   string
+	sessionID   acp.SessionId
+	writeMu     sync.Mutex
+	promptMu    sync.Mutex
+	promptWin   *acme.Win
+	promptWinMu sync.Mutex // guards promptWin
+	terminals   terminalMap
+	permMu      sync.Mutex  // guards permCh
+	permCh      chan string // non-nil while RequestPermission is waiting
+	inThought   bool        // true while streaming a thought block
+	modesMu     sync.Mutex  // guards modeState
+	modeState   *acp.SessionModeState
+	modelsMu    sync.Mutex // guards modelState
+	modelState  *acp.SessionModelState
 }
 
 // traceWriter wraps an io.WriteCloser and logs each write to stderr.
@@ -366,6 +367,13 @@ func (c *acmeClient) RequestPermission(ctx context.Context, p acp.RequestPermiss
 
 	var sb strings.Builder
 	sb.WriteString("[permission: " + title + "]\n")
+	if p.ToolCall.RawInput != nil {
+		if b, err := json.MarshalIndent(p.ToolCall.RawInput, "  ", "  "); err == nil {
+			sb.WriteString("  ")
+			sb.Write(b)
+			sb.WriteByte('\n')
+		}
+	}
 	for i, opt := range p.Options {
 		sb.WriteString(fmt.Sprintf("  %d/ %s\n", i+1, opt.Name))
 	}
