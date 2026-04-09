@@ -351,12 +351,26 @@ func (c *acmeClient) SessionUpdate(ctx context.Context, n acp.SessionNotificatio
 		}
 	case u.ToolCall != nil:
 		tc := u.ToolCall
+		var sb strings.Builder
+		sb.WriteString("[tool: " + tc.Title + "]")
+		if tc.RawInput != nil {
+			if b, err := json.Marshal(tc.RawInput); err == nil {
+				const maxLen = 200
+				s := string(b)
+				if len(s) > maxLen {
+					s = s[:maxLen] + "…"
+				}
+				sb.WriteString(" ")
+				sb.WriteString(s)
+			}
+		}
+		sb.WriteByte('\n')
 		c.writeMu.Lock()
 		if c.inThought {
 			c.win.Write("body", []byte("]\n"))
 			c.inThought = false
 		}
-		c.win.Write("body", []byte("[tool: "+tc.Title+"]\n"))
+		c.win.Write("body", []byte(sb.String()))
 		c.writeMu.Unlock()
 	case u.CurrentModeUpdate != nil:
 		upd := u.CurrentModeUpdate
