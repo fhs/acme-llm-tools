@@ -27,6 +27,8 @@ type acmeClient struct {
 	permMu       sync.Mutex // guards permCh
 	permCh       chan string // non-nil while RequestPermission is waiting
 	inThought    bool       // true while streaming a thought block
+	modesMu      sync.Mutex // guards modeState
+	modeState    *acp.SessionModeState
 }
 
 // traceWriter wraps an io.WriteCloser and logs each write to stderr.
@@ -112,12 +114,16 @@ func Run(ctx context.Context, agentArgs []string, trace bool, resume string) err
 			return fmt.Errorf("agent does not support session resume")
 		}
 		sessID = acp.SessionId(resume)
-		if _, err = conn.LoadSession(ctx, acp.LoadSessionRequest{
+		loadResp, loadErr := conn.LoadSession(ctx, acp.LoadSessionRequest{
 			SessionId:  sessID,
 			Cwd:        cwd,
 			McpServers: []acp.McpServer{},
-		}); err != nil {
-			return fmt.Errorf("ACP load session: %w", err)
+		})
+		if loadErr != nil {
+			return fmt.Errorf("ACP load session: %w", loadErr)
+		}
+		if loadResp.Modes != nil {
+			c.modeState = loadResp.Modes
 		}
 	} else {
 		sessResp, err := conn.NewSession(ctx, acp.NewSessionRequest{
@@ -128,6 +134,9 @@ func Run(ctx context.Context, agentArgs []string, trace bool, resume string) err
 			return fmt.Errorf("ACP new session: %w", err)
 		}
 		sessID = sessResp.SessionId
+		if sessResp.Modes != nil {
+			c.modeState = sessResp.Modes
+		}
 	}
 	c.sessionID = sessID
 	c.agentName = agentName
@@ -135,6 +144,9 @@ func Run(ctx context.Context, agentArgs []string, trace bool, resume string) err
 	// Name the window and set up the tag now that we have the session ID.
 	w.Name("+Acme/%s/%s", agentName, sessID)
 	w.Write("tag", []byte("Prompt"))
+	if c.modeState != nil {
+		w.Write("tag", []byte(" Mode"))
+	}
 	w.Ctl("clean")
 
 	// Set the acme dump command so "Dump"/"Load" preserves the session.
@@ -165,11 +177,18 @@ func Run(ctx context.Context, agentArgs []string, trace bool, resume string) err
 				return nil
 			case "Prompt":
 				go c.openPromptWindow(ctx, conn)
+			case "Mode":
+				c.printModes()
 			default:
 				w.WriteEvent(e)
 			}
 		case e.C2 == 'l' || e.C2 == 'L':
-			if !c.takePermInput(strings.TrimSpace(string(e.Text))) {
+			word := strings.TrimSpace(string(e.Text))
+			if c.takePermInput(word) {
+				// consumed by permission handler
+			} else if id, ok := c.modeByToken(word); ok {
+				go c.setMode(ctx, conn, id)
+			} else {
 				w.WriteEvent(e)
 			}
 		}
@@ -311,6 +330,14 @@ func (c *acmeClient) SessionUpdate(ctx context.Context, n acp.SessionNotificatio
 		}
 		c.win.Write("body", []byte("[tool: "+tc.Title+"]\n"))
 		c.writeMu.Unlock()
+	case u.CurrentModeUpdate != nil:
+		upd := u.CurrentModeUpdate
+		c.modesMu.Lock()
+		if c.modeState != nil {
+			c.modeState.CurrentModeId = upd.CurrentModeId
+		}
+		c.modesMu.Unlock()
+		c.appendLine("[mode: " + c.modeNameByID(upd.CurrentModeId) + "]\n")
 	}
 	return nil
 }
@@ -350,6 +377,74 @@ func (c *acmeClient) RequestPermission(ctx context.Context, p acp.RequestPermiss
 			}, nil
 		}
 	}
+}
+
+func (c *acmeClient) printModes() {
+	c.modesMu.Lock()
+	ms := c.modeState
+	c.modesMu.Unlock()
+	if ms == nil {
+		return
+	}
+	var sb strings.Builder
+	sb.WriteString("[modes: current=" + c.modeNameByID(ms.CurrentModeId) + "]\n")
+	for i, m := range ms.AvailableModes {
+		marker := "  "
+		if m.Id == ms.CurrentModeId {
+			marker = "* "
+		}
+		label := m.Name
+		if m.Description != nil {
+			label = m.Name + ": " + *m.Description
+		}
+		sb.WriteString(fmt.Sprintf("  %sm%d\t%s\n", marker, i+1, label))
+	}
+	c.appendLine(sb.String())
+}
+
+// modeNameByID returns the human-readable name for a mode ID, falling back to the raw ID string.
+// Must NOT be called with modesMu held.
+func (c *acmeClient) modeNameByID(id acp.SessionModeId) string {
+	c.modesMu.Lock()
+	defer c.modesMu.Unlock()
+	if c.modeState != nil {
+		for _, m := range c.modeState.AvailableModes {
+			if m.Id == id {
+				return m.Name
+			}
+		}
+	}
+	return string(id)
+}
+
+// modeByToken parses an "m<n>" token and returns the corresponding mode ID.
+func (c *acmeClient) modeByToken(word string) (acp.SessionModeId, bool) {
+	var n int
+	if _, err := fmt.Sscanf(word, "m%d", &n); err != nil {
+		return "", false
+	}
+	c.modesMu.Lock()
+	defer c.modesMu.Unlock()
+	if c.modeState == nil || n < 1 || n > len(c.modeState.AvailableModes) {
+		return "", false
+	}
+	return c.modeState.AvailableModes[n-1].Id, true
+}
+
+func (c *acmeClient) setMode(ctx context.Context, conn *acp.ClientSideConnection, id acp.SessionModeId) {
+	if _, err := conn.SetSessionMode(ctx, acp.SetSessionModeRequest{
+		SessionId: c.sessionID,
+		ModeId:    id,
+	}); err != nil {
+		c.appendLine("[error: set mode: " + err.Error() + "]\n")
+		return
+	}
+	c.modesMu.Lock()
+	if c.modeState != nil {
+		c.modeState.CurrentModeId = id
+	}
+	c.modesMu.Unlock()
+	c.appendLine("[mode: " + c.modeNameByID(id) + "]\n")
 }
 
 // WriteTextFile writes to a file.
