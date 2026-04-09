@@ -180,6 +180,8 @@ func Run(ctx context.Context, agentArgs []string, trace bool, resume string) err
 	}
 	c.appendLine("[acme-acp: " + action + " " + agentName + "]\n")
 
+	go c.openPromptWindow(ctx, conn)
+
 	// Event loop.
 	for e := range w.EventChan() {
 		if e == nil {
