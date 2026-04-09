@@ -111,6 +111,7 @@ func Run(ctx context.Context, agentArgs []string, trace bool, resume string) err
 			agentName = initResp.AgentInfo.Name
 		}
 	}
+	agentName = strings.ReplaceAll(agentName, " ", "-")
 
 	// Create or resume a session.
 	var sessID acp.SessionId
@@ -153,7 +154,7 @@ func Run(ctx context.Context, agentArgs []string, trace bool, resume string) err
 	c.agentName = agentName
 
 	// Name the window and set up the tag now that we have the session ID.
-	w.Name("+Acme/%s/%s", agentName, sessID)
+	w.Name("/ACP/%s/%s", agentName, sessID)
 	w.Write("tag", []byte("Prompt Cancel"))
 	if c.modeState != nil {
 		w.Write("tag", []byte(" Mode"))
@@ -236,7 +237,7 @@ func (c *acmeClient) openPromptWindow(ctx context.Context, conn *acp.ClientSideC
 		c.promptWinMu.Unlock()
 		return
 	}
-	pw.Name("+Acme/%s/%s/prompt", c.agentName, c.sessionID)
+	pw.Name("/ACP/%s/%s/prompt", c.agentName, c.sessionID)
 	pw.Write("tag", []byte("Send"))
 	pw.Ctl("clean")
 	c.promptWin = pw
