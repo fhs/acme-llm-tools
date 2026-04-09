@@ -32,6 +32,8 @@ type acmeClient struct {
 	modeState    *acp.SessionModeState
 	modelsMu     sync.Mutex // guards modelState
 	modelState   *acp.SessionModelState
+	commandsMu   sync.Mutex             // guards commands
+	commands     []acp.AvailableCommand // populated on AvailableCommandsUpdate
 }
 
 // traceWriter wraps an io.WriteCloser and logs each write to stderr.
@@ -159,6 +161,7 @@ func Run(ctx context.Context, agentArgs []string, trace bool, resume string) err
 	if c.modelState != nil {
 		w.Write("tag", []byte(" Model"))
 	}
+	w.Write("tag", []byte(" Slash"))
 	w.Ctl("clean")
 
 	// Set the acme dump command so "Dump"/"Load" preserves the session.
@@ -193,6 +196,8 @@ func Run(ctx context.Context, agentArgs []string, trace bool, resume string) err
 				c.printModes()
 			case "Model":
 				c.printModels()
+			case "Slash":
+				c.printCommands()
 			case "Cancel":
 				go func() {
 					_ = conn.Cancel(ctx, acp.CancelNotification{SessionId: c.sessionID})
@@ -359,6 +364,11 @@ func (c *acmeClient) SessionUpdate(ctx context.Context, n acp.SessionNotificatio
 		}
 		c.modesMu.Unlock()
 		c.appendLine("[mode: " + c.modeNameByID(upd.CurrentModeId) + "]\n")
+	case u.AvailableCommandsUpdate != nil:
+		upd := u.AvailableCommandsUpdate
+		c.commandsMu.Lock()
+		c.commands = upd.AvailableCommands
+		c.commandsMu.Unlock()
 	}
 	return nil
 }
@@ -511,6 +521,31 @@ func (c *acmeClient) modelNameByID(id acp.ModelId) string {
 		}
 	}
 	return string(id)
+}
+
+func (c *acmeClient) printCommands() {
+	c.commandsMu.Lock()
+	cmds := c.commands
+	c.commandsMu.Unlock()
+	var sb strings.Builder
+	if len(cmds) == 0 {
+		c.appendLine("[commands: none]\n")
+		return
+	}
+	sb.WriteString("[commands]\n")
+	for _, cmd := range cmds {
+		line := "/" + cmd.Name
+		if cmd.Description != "" {
+			line += "\t" + cmd.Description
+		}
+		if cmd.Input != nil && cmd.Input.UnstructuredCommandInput != nil {
+			if hint := cmd.Input.UnstructuredCommandInput.Hint; hint != "" {
+				line += " (" + hint + ")"
+			}
+		}
+		sb.WriteString("  " + line + "\n")
+	}
+	c.appendLine(sb.String())
 }
 
 // modelByToken parses a "model<n>" token and returns the corresponding model ID.
