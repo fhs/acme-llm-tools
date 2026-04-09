@@ -17,6 +17,7 @@ import (
 
 type acmeClient struct {
 	win          *acme.Win
+	agentName    string
 	sessionID    acp.SessionId
 	writeMu      sync.Mutex
 	promptMu     sync.Mutex
@@ -50,18 +51,14 @@ func (w *prefixWriter) Write(p []byte) (int, error) {
 }
 
 // Run creates an acme window, spawns the agent, and runs the event loop.
-func Run(ctx context.Context, agentArgs []string, trace bool) error {
+// If resume is non-empty, it loads the existing session with that ID instead of creating a new one.
+func Run(ctx context.Context, agentArgs []string, trace bool, resume string) error {
 	w, err := acme.New()
 	if err != nil {
 		return fmt.Errorf("open acme window: %w", err)
 	}
-	agentName := filepath.Base(agentArgs[0])
-	w.Name("+Acme/AI")
-	w.Write("tag", []byte("Prompt"))
-	w.Ctl("clean")
 
 	c := &acmeClient{win: w}
-	c.appendLine("[acme-acp: connected to " + agentName + "]\n")
 
 	// Spawn agent subprocess.
 	cmd := exec.CommandContext(ctx, agentArgs[0], agentArgs[1:]...)
@@ -91,20 +88,70 @@ func Run(ctx context.Context, agentArgs []string, trace bool) error {
 	conn := acp.NewClientSideConnection(c, connWriter, connReader)
 
 	cwd, _ := os.Getwd()
-	_, err = conn.Initialize(ctx, acp.InitializeRequest{
+	initResp, err := conn.Initialize(ctx, acp.InitializeRequest{
 		ProtocolVersion: acp.ProtocolVersionNumber,
 	})
 	if err != nil {
 		return fmt.Errorf("ACP initialize: %w", err)
 	}
-	sessResp, err := conn.NewSession(ctx, acp.NewSessionRequest{
-		Cwd:        cwd,
-		McpServers: []acp.McpServer{},
-	})
-	if err != nil {
-		return fmt.Errorf("ACP new session: %w", err)
+
+	// Determine agent display name.
+	agentName := filepath.Base(agentArgs[0])
+	if initResp.AgentInfo != nil {
+		if initResp.AgentInfo.Title != nil {
+			agentName = *initResp.AgentInfo.Title
+		} else {
+			agentName = initResp.AgentInfo.Name
+		}
 	}
-	c.sessionID = sessResp.SessionId
+
+	// Create or resume a session.
+	var sessID acp.SessionId
+	if resume != "" {
+		if !initResp.AgentCapabilities.LoadSession {
+			return fmt.Errorf("agent does not support session resume")
+		}
+		sessID = acp.SessionId(resume)
+		if _, err = conn.LoadSession(ctx, acp.LoadSessionRequest{
+			SessionId:  sessID,
+			Cwd:        cwd,
+			McpServers: []acp.McpServer{},
+		}); err != nil {
+			return fmt.Errorf("ACP load session: %w", err)
+		}
+	} else {
+		sessResp, err := conn.NewSession(ctx, acp.NewSessionRequest{
+			Cwd:        cwd,
+			McpServers: []acp.McpServer{},
+		})
+		if err != nil {
+			return fmt.Errorf("ACP new session: %w", err)
+		}
+		sessID = sessResp.SessionId
+	}
+	c.sessionID = sessID
+	c.agentName = agentName
+
+	// Name the window and set up the tag now that we have the session ID.
+	w.Name("+Acme/%s/%s", agentName, sessID)
+	w.Write("tag", []byte("Prompt"))
+	w.Ctl("clean")
+
+	// Set the acme dump command so "Dump"/"Load" preserves the session.
+	execPath, _ := os.Executable()
+	dumpParts := []string{execPath, "-resume", string(sessID)}
+	if trace {
+		dumpParts = append(dumpParts, "-rpc.trace")
+	}
+	dumpParts = append(dumpParts, agentArgs...)
+	w.Ctl("dump " + strings.Join(dumpParts, " "))
+	w.Ctl("dumpdir " + cwd)
+
+	action := "connected to"
+	if resume != "" {
+		action = "resumed"
+	}
+	c.appendLine("[acme-acp: " + action + " " + agentName + "]\n")
 
 	// Event loop.
 	for e := range w.EventChan() {
@@ -143,7 +190,7 @@ func (c *acmeClient) openPromptWindow(ctx context.Context, conn *acp.ClientSideC
 		c.promptWinMu.Unlock()
 		return
 	}
-	pw.Name("+Acme/AI/prompt")
+	pw.Name("+Acme/%s/%s/prompt", c.agentName, c.sessionID)
 	pw.Write("tag", []byte("Send"))
 	pw.Ctl("clean")
 	c.promptWin = pw
