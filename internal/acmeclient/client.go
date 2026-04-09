@@ -25,8 +25,8 @@ type acmeClient struct {
 	promptWin    *acme.Win
 	promptWinMu  sync.Mutex // guards promptWin
 	terminals    terminalMap
-	permMu       sync.Mutex  // guards permCh
-	permCh       chan string // non-nil while RequestPermission is waiting
+	permMu       sync.Mutex // guards permCh
+	permCh       chan int   // non-nil while RequestPermission is waiting
 	inThought    bool        // true while streaming a thought block
 	modesMu      sync.Mutex  // guards modeState
 	modeState    *acp.SessionModeState
@@ -299,21 +299,26 @@ func (c *acmeClient) prompt(ctx context.Context, conn *acp.ClientSideConnection,
 	c.appendLine("\n")
 }
 
-func (c *acmeClient) setPermCh(ch chan string) {
+func (c *acmeClient) setPermCh(ch chan int) {
 	c.permMu.Lock()
 	defer c.permMu.Unlock()
 	c.permCh = ch
 }
 
-// takePermInput delivers word to the pending permission channel if one exists.
-// Returns true if consumed, false if the event should be forwarded to acme.
+// takePermInput delivers word to the pending permission channel if one exists
+// and word is a positive integer. Returns true if consumed, false if the event
+// should be forwarded to acme.
 func (c *acmeClient) takePermInput(word string) bool {
 	c.permMu.Lock()
 	defer c.permMu.Unlock()
 	if c.permCh == nil {
 		return false
 	}
-	c.permCh <- word
+	n, err := strconv.Atoi(strings.TrimSpace(word))
+	if err != nil || n < 1 {
+		return false
+	}
+	c.permCh <- n
 	return true
 }
 
@@ -410,7 +415,7 @@ func (c *acmeClient) RequestPermission(ctx context.Context, p acp.RequestPermiss
 	}
 	c.appendLine(sb.String())
 
-	ch := make(chan string, 1)
+	ch := make(chan int, 1)
 	c.setPermCh(ch)
 	defer c.setPermCh(nil)
 
@@ -420,9 +425,8 @@ func (c *acmeClient) RequestPermission(ctx context.Context, p acp.RequestPermiss
 			return acp.RequestPermissionResponse{
 				Outcome: acp.NewRequestPermissionOutcomeCancelled(),
 			}, nil
-		case word := <-ch:
-			n, err := strconv.Atoi(strings.TrimSpace(word))
-			if err != nil || n < 1 || n > len(p.Options) {
+		case n := <-ch:
+			if n < 1 || n > len(p.Options) {
 				continue
 			}
 			c.appendLine(fmt.Sprintf("[permission: %q selected]\n", p.Options[n-1].Name))
