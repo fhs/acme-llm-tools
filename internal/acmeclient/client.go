@@ -20,13 +20,14 @@ type acmeClient struct {
 	win          *acme.Win
 	agentName    string
 	sessionID    acp.SessionId
+	noFS         bool
 	writeMu      sync.Mutex
 	promptMu     sync.Mutex
 	promptWin    *acme.Win
 	promptWinMu  sync.Mutex // guards promptWin
 	terminals    terminalMap
 	permMu       sync.Mutex // guards permCh
-	permCh       chan int   // non-nil while RequestPermission is waiting
+	permCh       chan int    // non-nil while RequestPermission is waiting
 	inThought    bool        // true while streaming a thought block
 	modesMu      sync.Mutex  // guards modeState
 	modeState    *acp.SessionModeState
@@ -59,13 +60,13 @@ func (w *prefixWriter) Write(p []byte) (int, error) {
 
 // Run creates an acme window, spawns the agent, and runs the event loop.
 // If resume is non-empty, it loads the existing session with that ID instead of creating a new one.
-func Run(ctx context.Context, agentArgs []string, trace bool, resume string) error {
+func Run(ctx context.Context, agentArgs []string, trace bool, resume string, noFS bool) error {
 	w, err := acme.New()
 	if err != nil {
 		return fmt.Errorf("open acme window: %w", err)
 	}
 
-	c := &acmeClient{win: w}
+	c := &acmeClient{win: w, noFS: noFS}
 
 	// Spawn agent subprocess.
 	cmd := exec.CommandContext(ctx, agentArgs[0], agentArgs[1:]...)
@@ -95,8 +96,16 @@ func Run(ctx context.Context, agentArgs []string, trace bool, resume string) err
 	conn := acp.NewClientSideConnection(c, connWriter, connReader)
 
 	cwd, _ := os.Getwd()
+	caps := acp.ClientCapabilities{}
+	if !noFS {
+		caps.Fs = acp.FileSystemCapability{
+			ReadTextFile:  true,
+			WriteTextFile: true,
+		}
+	}
 	initResp, err := conn.Initialize(ctx, acp.InitializeRequest{
-		ProtocolVersion: acp.ProtocolVersionNumber,
+		ProtocolVersion:    acp.ProtocolVersionNumber,
+		ClientCapabilities: caps,
 	})
 	if err != nil {
 		return fmt.Errorf("ACP initialize: %w", err)
@@ -170,6 +179,9 @@ func Run(ctx context.Context, agentArgs []string, trace bool, resume string) err
 	dumpParts := []string{execPath, "-resume", string(sessID)}
 	if trace {
 		dumpParts = append(dumpParts, "-rpc.trace")
+	}
+	if noFS {
+		dumpParts = append(dumpParts, "-no-fs")
 	}
 	dumpParts = append(dumpParts, agentArgs...)
 	w.Ctl("dump " + strings.Join(dumpParts, " "))
@@ -599,19 +611,83 @@ func (c *acmeClient) setModel(ctx context.Context, conn *acp.ClientSideConnectio
 	c.appendLine("[model: " + c.modelNameByID(id) + "]\n")
 }
 
-// WriteTextFile writes to a file.
+// findWindowByPath returns the acme window ID whose name matches path, or -1 if none.
+func findWindowByPath(path string) int {
+	wins, err := acme.Windows()
+	if err != nil {
+		return -1
+	}
+	for _, w := range wins {
+		if w.Name == path {
+			return w.ID
+		}
+	}
+	return -1
+}
+
+// applyLineLimit applies the optional line (1-based start) and limit (max lines)
+// parameters to content, as specified by the ACP ReadTextFile protocol.
+func applyLineLimit(content string, line, limit *int) string {
+	if line == nil && limit == nil {
+		return content
+	}
+	lines := strings.SplitAfter(content, "\n")
+	start := 0
+	if line != nil && *line > 1 {
+		start = *line - 1
+	}
+	if start >= len(lines) {
+		return ""
+	}
+	lines = lines[start:]
+	if limit != nil && *limit < len(lines) {
+		lines = lines[:*limit]
+	}
+	return strings.Join(lines, "")
+}
+
+// ReadTextFile reads a file, preferring an open acme window's body when available.
+func (c *acmeClient) ReadTextFile(ctx context.Context, p acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
+	var content string
+	if !c.noFS {
+		if id := findWindowByPath(p.Path); id >= 0 {
+			if w, err := acme.Open(id, nil); err == nil {
+				if body, err := w.ReadAll("body"); err == nil {
+					content = string(body)
+				}
+			}
+		}
+	}
+	if content == "" {
+		data, err := os.ReadFile(p.Path)
+		if err != nil {
+			return acp.ReadTextFileResponse{}, err
+		}
+		content = string(data)
+	}
+	return acp.ReadTextFileResponse{Content: applyLineLimit(content, p.Line, p.Limit)}, nil
+}
+
+// WriteTextFile writes a file and reflects the change in an acme window.
 func (c *acmeClient) WriteTextFile(ctx context.Context, p acp.WriteTextFileRequest) (acp.WriteTextFileResponse, error) {
 	if err := os.WriteFile(p.Path, []byte(p.Content), 0o644); err != nil {
 		return acp.WriteTextFileResponse{}, err
 	}
-	return acp.WriteTextFileResponse{}, nil
-}
-
-// ReadTextFile reads a file.
-func (c *acmeClient) ReadTextFile(ctx context.Context, p acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
-	data, err := os.ReadFile(p.Path)
-	if err != nil {
-		return acp.ReadTextFileResponse{}, err
+	if !c.noFS {
+		if id := findWindowByPath(p.Path); id >= 0 {
+			if w, err := acme.Open(id, nil); err == nil {
+				w.Addr(",")
+				w.Write("data", []byte(p.Content))
+				w.Ctl("clean")
+			}
+		} else {
+			if w, err := acme.New(); err == nil {
+				w.Name("%s", p.Path)
+				w.Addr(",")
+				w.Write("data", []byte(p.Content))
+				w.Ctl("clean")
+			}
+		}
 	}
-	return acp.ReadTextFileResponse{Content: string(data)}, nil
+	return acp.WriteTextFileResponse{}, nil
 }
