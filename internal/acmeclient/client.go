@@ -68,8 +68,11 @@ func Run(ctx context.Context, agentArgs []string, trace bool, resume string, noF
 
 	c := &acmeClient{win: w, noFS: noFS}
 
+	agentCtx, cancelAgent := context.WithCancel(ctx)
+	defer cancelAgent()
+
 	// Spawn agent subprocess.
-	cmd := exec.CommandContext(ctx, agentArgs[0], agentArgs[1:]...)
+	cmd := exec.CommandContext(agentCtx, agentArgs[0], agentArgs[1:]...)
 	agentStdin, err := cmd.StdinPipe()
 	if err != nil {
 		return fmt.Errorf("agent stdin pipe: %w", err)
@@ -84,6 +87,7 @@ func Run(ctx context.Context, agentArgs []string, trace bool, resume string, noF
 	}
 	defer func() {
 		_ = agentStdin.Close()
+		cancelAgent()
 		_ = cmd.Wait()
 	}()
 
@@ -192,6 +196,7 @@ func Run(ctx context.Context, agentArgs []string, trace bool, resume string, noF
 		action = "resumed"
 	}
 	c.appendLine("[acme-acp: " + action + " " + agentName + "]\n")
+	w.Ctl("clean")
 
 	go c.openPromptWindow(ctx, conn)
 
@@ -204,6 +209,12 @@ func Run(ctx context.Context, agentArgs []string, trace bool, resume string, noF
 		case e.C2 == 'x' || e.C2 == 'X':
 			switch string(e.Text) {
 			case "Del":
+				c.promptWinMu.Lock()
+				if c.promptWin != nil {
+					c.promptWin.Del(true)
+				}
+				c.promptWinMu.Unlock()
+				c.win.Del(true)
 				return nil
 			case "Prompt":
 				go c.openPromptWindow(ctx, conn)
@@ -307,9 +318,10 @@ func (c *acmeClient) prompt(ctx context.Context, conn *acp.ClientSideConnection,
 	})
 	if err != nil {
 		c.appendLine("\n[error: " + err.Error() + "]\n")
-		return
+	} else {
+		c.appendLine("\n")
 	}
-	c.appendLine("\n")
+	c.win.Ctl("clean")
 }
 
 func (c *acmeClient) setPermCh(ch chan int) {
@@ -427,6 +439,7 @@ func (c *acmeClient) RequestPermission(ctx context.Context, p acp.RequestPermiss
 		sb.WriteString(fmt.Sprintf("  %d/ %s\n", i+1, opt.Name))
 	}
 	c.appendLine(sb.String())
+	c.win.Ctl("clean")
 
 	ch := make(chan int, 1)
 	c.setPermCh(ch)
