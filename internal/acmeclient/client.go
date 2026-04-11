@@ -21,21 +21,21 @@ import (
 )
 
 type acmeClient struct {
-	win          *acme.Win
-	agentName    string
-	sessionID    acp.SessionId
-	noFS         bool
-	writeMu      sync.Mutex
-	promptMu     sync.Mutex
-	promptWin    *acme.Win
-	promptWinMu  sync.Mutex // guards promptWin
-	terminals    terminalMap
-	permMu       sync.Mutex // guards permCh
-	permCh       chan int    // non-nil while RequestPermission is waiting
-	inThought    bool        // true while streaming a thought block
-	commandsMu   sync.Mutex             // guards commands
-	commands     []acp.AvailableCommand // populated on AvailableCommandsUpdate
-	configsMu    sync.Mutex             // guards configOptions
+	win           *acme.Win
+	agentName     string
+	sessionID     acp.SessionId
+	noFS          bool
+	writeMu       sync.Mutex
+	promptMu      sync.Mutex
+	promptWin     *acme.Win
+	promptWinMu   sync.Mutex // guards promptWin
+	terminals     terminalMap
+	permMu        sync.Mutex             // guards permCh
+	permCh        chan int               // non-nil while RequestPermission is waiting
+	inThought     bool                   // true while streaming a thought block
+	commandsMu    sync.Mutex             // guards commands
+	commands      []acp.AvailableCommand // populated on AvailableCommandsUpdate
+	configsMu     sync.Mutex             // guards configOptions
 	configOptions []acp.SessionConfigOption
 }
 
