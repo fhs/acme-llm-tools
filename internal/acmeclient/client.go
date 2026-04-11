@@ -221,11 +221,15 @@ func Run(ctx context.Context, agentArgs []string, trace bool, resume string, noF
 				go c.openPromptWindow(ctx, conn)
 			case "Config":
 				c.printConfigs()
+				c.win.Ctl("clean")
 			case "Slash":
 				c.printCommands()
+				c.win.Ctl("clean")
 			case "Cancel":
 				go func() {
-					_ = conn.Cancel(ctx, acp.CancelNotification{SessionId: c.sessionID})
+					if err := conn.Cancel(ctx, acp.CancelNotification{SessionId: c.sessionID}); err == nil {
+						c.win.Ctl("clean")
+					}
 				}()
 			default:
 				w.WriteEvent(e)
