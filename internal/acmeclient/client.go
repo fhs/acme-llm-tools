@@ -457,7 +457,11 @@ func (c *acmeClient) RequestPermission(ctx context.Context, p acp.RequestPermiss
 			}
 			c.appendLine(fmt.Sprintf("[permission: %q selected]\n", p.Options[n-1].Name))
 			return acp.RequestPermissionResponse{
-				Outcome: acp.NewRequestPermissionOutcomeSelected(p.Options[n-1].OptionId),
+				Outcome: func() acp.RequestPermissionOutcome {
+					o := acp.NewRequestPermissionOutcomeSelected()
+					o.Selected.OptionId = p.Options[n-1].OptionId
+					return o
+				}(),
 			}, nil
 		}
 	}
@@ -584,8 +588,8 @@ func (c *acmeClient) printCommands() {
 		if cmd.Description != "" {
 			line += "\t" + cmd.Description
 		}
-		if cmd.Input != nil && cmd.Input.UnstructuredCommandInput != nil {
-			if hint := cmd.Input.UnstructuredCommandInput.Hint; hint != "" {
+		if cmd.Input != nil && cmd.Input.Unstructured != nil {
+			if hint := cmd.Input.Unstructured.Hint; hint != "" {
 				line += " (" + hint + ")"
 			}
 		}
@@ -609,9 +613,9 @@ func (c *acmeClient) modelByToken(word string) (acp.ModelId, bool) {
 }
 
 func (c *acmeClient) setModel(ctx context.Context, conn *acp.ClientSideConnection, id acp.ModelId) {
-	if _, err := conn.SetSessionModel(ctx, acp.SetSessionModelRequest{
+	if _, err := conn.UnstableSetSessionModel(ctx, acp.UnstableSetSessionModelRequest{
 		SessionId: c.sessionID,
-		ModelId:   id,
+		ModelId:   acp.UnstableModelId(id),
 	}); err != nil {
 		c.appendLine("[error: set model: " + err.Error() + "]\n")
 		return

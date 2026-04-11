@@ -4,11 +4,11 @@ go 1.25.0
 
 require (
 	9fans.net/go v0.0.7
+	github.com/coder/acp-go-sdk v0.6.4-0.20260227160919-584abe6abe22
 	github.com/modelcontextprotocol/go-sdk v1.5.0
 )
 
 require (
-	github.com/coder/acp-go-sdk v0.6.3 // indirect
 	github.com/google/jsonschema-go v0.4.2 // indirect
 	github.com/segmentio/asm v1.1.3 // indirect
 	github.com/segmentio/encoding v0.5.4 // indirect
