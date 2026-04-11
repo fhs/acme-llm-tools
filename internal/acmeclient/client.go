@@ -29,12 +29,10 @@ type acmeClient struct {
 	permMu       sync.Mutex // guards permCh
 	permCh       chan int    // non-nil while RequestPermission is waiting
 	inThought    bool        // true while streaming a thought block
-	modesMu      sync.Mutex  // guards modeState
-	modeState    *acp.SessionModeState
-	modelsMu     sync.Mutex // guards modelState
-	modelState   *acp.SessionModelState
 	commandsMu   sync.Mutex             // guards commands
 	commands     []acp.AvailableCommand // populated on AvailableCommandsUpdate
+	configsMu    sync.Mutex             // guards configOptions
+	configOptions []acp.SessionConfigOption
 }
 
 // traceWriter wraps an io.WriteCloser and logs each write to stderr.
@@ -141,11 +139,8 @@ func Run(ctx context.Context, agentArgs []string, trace bool, resume string, noF
 		if loadErr != nil {
 			return fmt.Errorf("ACP load session: %w", loadErr)
 		}
-		if loadResp.Modes != nil {
-			c.modeState = loadResp.Modes
-		}
-		if loadResp.Models != nil {
-			c.modelState = loadResp.Models
+		if len(loadResp.ConfigOptions) > 0 {
+			c.configOptions = loadResp.ConfigOptions
 		}
 	} else {
 		sessResp, err := conn.NewSession(ctx, acp.NewSessionRequest{
@@ -156,11 +151,8 @@ func Run(ctx context.Context, agentArgs []string, trace bool, resume string, noF
 			return fmt.Errorf("ACP new session: %w", err)
 		}
 		sessID = sessResp.SessionId
-		if sessResp.Modes != nil {
-			c.modeState = sessResp.Modes
-		}
-		if sessResp.Models != nil {
-			c.modelState = sessResp.Models
+		if len(sessResp.ConfigOptions) > 0 {
+			c.configOptions = sessResp.ConfigOptions
 		}
 	}
 	c.sessionID = sessID
@@ -169,11 +161,8 @@ func Run(ctx context.Context, agentArgs []string, trace bool, resume string, noF
 	// Name the window and set up the tag now that we have the session ID.
 	w.Name("/ACP/%s/%s", agentName, sessID)
 	w.Write("tag", []byte("Prompt Cancel"))
-	if c.modeState != nil {
-		w.Write("tag", []byte(" Mode"))
-	}
-	if c.modelState != nil {
-		w.Write("tag", []byte(" Model"))
+	if len(c.configOptions) > 0 {
+		w.Write("tag", []byte(" Config"))
 	}
 	w.Write("tag", []byte(" Slash"))
 	w.Ctl("clean")
@@ -218,10 +207,8 @@ func Run(ctx context.Context, agentArgs []string, trace bool, resume string, noF
 				return nil
 			case "Prompt":
 				go c.openPromptWindow(ctx, conn)
-			case "Mode":
-				c.printModes()
-			case "Model":
-				c.printModels()
+			case "Config":
+				c.printConfigs()
 			case "Slash":
 				c.printCommands()
 			case "Cancel":
@@ -235,10 +222,8 @@ func Run(ctx context.Context, agentArgs []string, trace bool, resume string, noF
 			word := strings.TrimSpace(string(e.Text))
 			if c.takePermInput(word) {
 				// consumed by permission handler
-			} else if id, ok := c.modeByToken(word); ok {
-				go c.setMode(ctx, conn, id)
-			} else if id, ok := c.modelByToken(word); ok {
-				go c.setModel(ctx, conn, id)
+			} else if cfgID, valID, ok := c.configByToken(word); ok {
+				go c.setConfigOption(ctx, conn, cfgID, valID)
 			} else {
 				w.WriteEvent(e)
 			}
@@ -413,19 +398,16 @@ func (c *acmeClient) SessionUpdate(ctx context.Context, n acp.SessionNotificatio
 		}
 		c.win.Write("body", []byte(sb.String()))
 		c.writeMu.Unlock()
-	case u.CurrentModeUpdate != nil:
-		upd := u.CurrentModeUpdate
-		c.modesMu.Lock()
-		if c.modeState != nil {
-			c.modeState.CurrentModeId = upd.CurrentModeId
-		}
-		c.modesMu.Unlock()
-		c.appendLine("[mode: " + c.modeNameByID(upd.CurrentModeId) + "]\n")
 	case u.AvailableCommandsUpdate != nil:
 		upd := u.AvailableCommandsUpdate
 		c.commandsMu.Lock()
 		c.commands = upd.AvailableCommands
 		c.commandsMu.Unlock()
+	case u.ConfigOptionUpdate != nil:
+		upd := u.ConfigOptionUpdate
+		c.configsMu.Lock()
+		c.configOptions = upd.ConfigOptions
+		c.configsMu.Unlock()
 	}
 	return nil
 }
@@ -478,112 +460,6 @@ func (c *acmeClient) RequestPermission(ctx context.Context, p acp.RequestPermiss
 	}
 }
 
-func (c *acmeClient) printModes() {
-	c.modesMu.Lock()
-	ms := c.modeState
-	c.modesMu.Unlock()
-	if ms == nil {
-		return
-	}
-	var sb strings.Builder
-	sb.WriteString("[modes: current=" + c.modeNameByID(ms.CurrentModeId) + "]\n")
-	for i, m := range ms.AvailableModes {
-		marker := "  "
-		if m.Id == ms.CurrentModeId {
-			marker = "* "
-		}
-		label := m.Name
-		if m.Description != nil {
-			label = m.Name + ": " + *m.Description
-		}
-		sb.WriteString(fmt.Sprintf("  %smode%d\t%s\n", marker, i+1, label))
-	}
-	c.appendLine(sb.String())
-}
-
-// modeNameByID returns the human-readable name for a mode ID, falling back to the raw ID string.
-// Must NOT be called with modesMu held.
-func (c *acmeClient) modeNameByID(id acp.SessionModeId) string {
-	c.modesMu.Lock()
-	defer c.modesMu.Unlock()
-	if c.modeState != nil {
-		for _, m := range c.modeState.AvailableModes {
-			if m.Id == id {
-				return m.Name
-			}
-		}
-	}
-	return string(id)
-}
-
-// modeByToken parses an "m<n>" token and returns the corresponding mode ID.
-func (c *acmeClient) modeByToken(word string) (acp.SessionModeId, bool) {
-	var n int
-	if _, err := fmt.Sscanf(word, "mode%d", &n); err != nil {
-		return "", false
-	}
-	c.modesMu.Lock()
-	defer c.modesMu.Unlock()
-	if c.modeState == nil || n < 1 || n > len(c.modeState.AvailableModes) {
-		return "", false
-	}
-	return c.modeState.AvailableModes[n-1].Id, true
-}
-
-func (c *acmeClient) setMode(ctx context.Context, conn *acp.ClientSideConnection, id acp.SessionModeId) {
-	if _, err := conn.SetSessionMode(ctx, acp.SetSessionModeRequest{
-		SessionId: c.sessionID,
-		ModeId:    id,
-	}); err != nil {
-		c.appendLine("[error: set mode: " + err.Error() + "]\n")
-		return
-	}
-	c.modesMu.Lock()
-	if c.modeState != nil {
-		c.modeState.CurrentModeId = id
-	}
-	c.modesMu.Unlock()
-	c.appendLine("[mode: " + c.modeNameByID(id) + "]\n")
-}
-
-func (c *acmeClient) printModels() {
-	c.modelsMu.Lock()
-	ms := c.modelState
-	c.modelsMu.Unlock()
-	if ms == nil {
-		return
-	}
-	var sb strings.Builder
-	sb.WriteString("[models: current=" + c.modelNameByID(ms.CurrentModelId) + "]\n")
-	for i, m := range ms.AvailableModels {
-		marker := "  "
-		if m.ModelId == ms.CurrentModelId {
-			marker = "* "
-		}
-		label := m.Name
-		if m.Description != nil {
-			label = m.Name + ": " + *m.Description
-		}
-		sb.WriteString(fmt.Sprintf("  %smodel%d\t%s\n", marker, i+1, label))
-	}
-	c.appendLine(sb.String())
-}
-
-// modelNameByID returns the human-readable name for a model ID, falling back to the raw ID string.
-// Must NOT be called with modelsMu held.
-func (c *acmeClient) modelNameByID(id acp.ModelId) string {
-	c.modelsMu.Lock()
-	defer c.modelsMu.Unlock()
-	if c.modelState != nil {
-		for _, m := range c.modelState.AvailableModels {
-			if m.ModelId == id {
-				return m.Name
-			}
-		}
-	}
-	return string(id)
-}
-
 func (c *acmeClient) printCommands() {
 	c.commandsMu.Lock()
 	cmds := c.commands
@@ -609,34 +485,89 @@ func (c *acmeClient) printCommands() {
 	c.appendLine(sb.String())
 }
 
-// modelByToken parses a "model<n>" token and returns the corresponding model ID.
-func (c *acmeClient) modelByToken(word string) (acp.ModelId, bool) {
-	var n int
-	if _, err := fmt.Sscanf(word, "model%d", &n); err != nil {
-		return "", false
+// flatConfigValues returns the flat (ungrouped) list of values for a SessionConfigOptionSelect.
+func flatConfigValues(sel *acp.SessionConfigOptionSelect) []acp.SessionConfigSelectOption {
+	if sel.Options.Ungrouped != nil {
+		return []acp.SessionConfigSelectOption(*sel.Options.Ungrouped)
 	}
-	c.modelsMu.Lock()
-	defer c.modelsMu.Unlock()
-	if c.modelState == nil || n < 1 || n > len(c.modelState.AvailableModels) {
-		return "", false
+	if sel.Options.Grouped != nil {
+		var flat []acp.SessionConfigSelectOption
+		for _, g := range *sel.Options.Grouped {
+			flat = append(flat, g.Options...)
+		}
+		return flat
 	}
-	return c.modelState.AvailableModels[n-1].ModelId, true
+	return nil
 }
 
-func (c *acmeClient) setModel(ctx context.Context, conn *acp.ClientSideConnection, id acp.ModelId) {
-	if _, err := conn.UnstableSetSessionModel(ctx, acp.UnstableSetSessionModelRequest{
-		SessionId: c.sessionID,
-		ModelId:   acp.UnstableModelId(id),
-	}); err != nil {
-		c.appendLine("[error: set model: " + err.Error() + "]\n")
+func (c *acmeClient) printConfigs() {
+	c.configsMu.Lock()
+	opts := c.configOptions
+	c.configsMu.Unlock()
+	if len(opts) == 0 {
+		c.appendLine("[config: none]\n")
 		return
 	}
-	c.modelsMu.Lock()
-	if c.modelState != nil {
-		c.modelState.CurrentModelId = id
+	var sb strings.Builder
+	sb.WriteString("[config]\n")
+	for i, opt := range opts {
+		if opt.Select == nil {
+			continue
+		}
+		sel := opt.Select
+		vals := flatConfigValues(sel)
+		sb.WriteString("  " + sel.Name + ":\n")
+		for j, v := range vals {
+			marker := "  "
+			if v.Value == sel.CurrentValue {
+				marker = "* "
+			}
+			label := v.Name
+			if v.Description != nil {
+				label = v.Name + ": " + *v.Description
+			}
+			fmt.Fprintf(&sb, "    %scfg%dv%d\t%s\n", marker, i+1, j+1, label)
+		}
 	}
-	c.modelsMu.Unlock()
-	c.appendLine("[model: " + c.modelNameByID(id) + "]\n")
+	c.appendLine(sb.String())
+}
+
+// configByToken parses a "cfg{i}v{j}" token and returns the config ID and value ID.
+func (c *acmeClient) configByToken(word string) (acp.SessionConfigId, acp.SessionConfigValueId, bool) {
+	var i, j int
+	if _, err := fmt.Sscanf(word, "cfg%dv%d", &i, &j); err != nil {
+		return "", "", false
+	}
+	c.configsMu.Lock()
+	defer c.configsMu.Unlock()
+	if i < 1 || i > len(c.configOptions) {
+		return "", "", false
+	}
+	sel := c.configOptions[i-1].Select
+	if sel == nil {
+		return "", "", false
+	}
+	vals := flatConfigValues(sel)
+	if j < 1 || j > len(vals) {
+		return "", "", false
+	}
+	return sel.Id, vals[j-1].Value, true
+}
+
+func (c *acmeClient) setConfigOption(ctx context.Context, conn *acp.ClientSideConnection, cfgID acp.SessionConfigId, valID acp.SessionConfigValueId) {
+	resp, err := conn.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{
+		SessionId: c.sessionID,
+		ConfigId:  cfgID,
+		Value:     valID,
+	})
+	if err != nil {
+		c.appendLine("[error: set config: " + err.Error() + "]\n")
+		return
+	}
+	c.configsMu.Lock()
+	c.configOptions = resp.ConfigOptions
+	c.configsMu.Unlock()
+	c.appendLine("[config: " + string(cfgID) + "=" + string(valID) + "]\n")
 }
 
 // findWindowByPath returns the acme window ID whose name matches path, or -1 if none.
