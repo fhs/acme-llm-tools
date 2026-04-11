@@ -357,6 +357,17 @@ func (c *acmeClient) appendLine(s string) {
 func (c *acmeClient) SessionUpdate(ctx context.Context, n acp.SessionNotification) error {
 	u := n.Update
 	switch {
+	case u.UserMessageChunk != nil:
+		content := u.UserMessageChunk.Content
+		if content.Text != nil {
+			c.writeMu.Lock()
+			if c.inThought {
+				c.win.Write("body", []byte("]\n"))
+				c.inThought = false
+			}
+			c.win.Write("body", []byte("> "+content.Text.Text+"\n"))
+			c.writeMu.Unlock()
+		}
 	case u.AgentMessageChunk != nil:
 		content := u.AgentMessageChunk.Content
 		if content.Text != nil {
