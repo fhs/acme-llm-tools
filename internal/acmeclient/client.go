@@ -58,7 +58,7 @@ func (w *prefixWriter) Write(p []byte) (int, error) {
 
 // Run creates an acme window, spawns the agent, and runs the event loop.
 // If resume is non-empty, it loads the existing session with that ID instead of creating a new one.
-func Run(ctx context.Context, agentArgs []string, trace bool, resume string, noFS bool) error {
+func Run(ctx context.Context, agentArgs []string, trace bool, resume string, noFS bool, configPairs []string) error {
 	w, err := acme.New()
 	if err != nil {
 		return fmt.Errorf("open acme window: %w", err)
@@ -158,6 +158,15 @@ func Run(ctx context.Context, agentArgs []string, trace bool, resume string, noF
 	c.sessionID = sessID
 	c.agentName = agentName
 
+	// Apply any config options requested via -config flags.
+	for _, pair := range configPairs {
+		k, v, ok := strings.Cut(pair, "=")
+		if !ok {
+			return fmt.Errorf("invalid -config value %q: expected id=value", pair)
+		}
+		c.setConfigOption(ctx, conn, acp.SessionConfigId(k), acp.SessionConfigValueId(v))
+	}
+
 	// Name the window and set up the tag now that we have the session ID.
 	w.Name("/ACP/%s/%s", agentName, sessID)
 	w.Write("tag", []byte("Prompt Cancel"))
@@ -175,6 +184,9 @@ func Run(ctx context.Context, agentArgs []string, trace bool, resume string, noF
 	}
 	if noFS {
 		dumpParts = append(dumpParts, "-no-fs")
+	}
+	for _, pair := range configPairs {
+		dumpParts = append(dumpParts, "-config", pair)
 	}
 	dumpParts = append(dumpParts, agentArgs...)
 	w.Ctl("dump " + strings.Join(dumpParts, " "))
