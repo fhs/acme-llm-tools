@@ -2,6 +2,8 @@
 // Use of this source code is governed by the MIT License
 // that can be found in the LICENSE file.
 
+//go:generate go test github.com/fhs/acme-llm-tools/cmd/acme-acp -v -run=^TestDocsUpToDate$ -fixdocs
+
 package main
 
 import (
@@ -24,8 +26,8 @@ func main() {
 	})
 	flag.Parse()
 	if flag.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: acme-acp [-rpc.trace] [-resume uuid] [-no-fs] [-config id=value] <agent> [args...]")
-		os.Exit(1)
+		flag.Usage()
+		os.Exit(2)
 	}
 	if err := acmeclient.Run(context.Background(), flag.Args(), *trace, *resume, *noFS, configs); err != nil {
 		fmt.Fprintln(os.Stderr, "acme-acp:", err)
