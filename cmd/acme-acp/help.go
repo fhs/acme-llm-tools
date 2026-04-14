@@ -5,9 +5,8 @@
 package main
 
 import (
-	"flag"
-	"fmt"
 	"os"
+	"strings"
 )
 
 const usageMsg = `Acme-acp spawns an ACP-compatible agent process and manages its
@@ -19,21 +18,6 @@ across editor restarts.
 Usage:
 
 	acme-acp [-rpc.trace] [-resume uuid] [-no-fs] [-config id=value] agent [args...]
-
-The flags are:
-
-	-config id=value
-		Set a session configuration option at startup.  May be
-		repeated.  The option id and available values are those
-		shown by the Config command (see below).
-	-no-fs
-		Disable ACP filesystem support.  The agent will not be
-		able to read or write files through Acme.
-	-resume uuid
-		Resume an existing session by its UUID instead of creating
-		a new one.
-	-rpc.trace
-		Print the ACP JSON-RPC trace to standard error.
 
 # Windows
 
@@ -102,11 +86,11 @@ To resume a session manually:
 `
 
 func usageText() string {
-	return usageMsg
-}
-
-func init() {
-	flag.Usage = func() {
-		fmt.Fprint(os.Stderr, usageMsg)
-	}
+	var buf strings.Builder
+	buf.WriteString(usageMsg)
+	buf.WriteString("Flags:\n\n")
+	appFlags.SetOutput(&buf)
+	appFlags.PrintDefaults()
+	appFlags.SetOutput(os.Stderr)
+	return buf.String()
 }

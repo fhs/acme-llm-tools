@@ -15,21 +15,34 @@ import (
 	"github.com/fhs/acme-llm-tools/internal/acmeclient"
 )
 
-func main() {
-	trace := flag.Bool("rpc.trace", false, "print RPC trace to stderr")
-	resume := flag.String("resume", "", "resume an existing session by UUID")
-	noFS := flag.Bool("no-fs", false, "disable ACP filesystem support")
-	var configs []string
-	flag.Func("config", "set session config option as `id=value` (may be repeated)", func(s string) error {
+var appFlags = flag.NewFlagSet("acme-acp", flag.ContinueOnError)
+
+var (
+	trace   = appFlags.Bool("rpc.trace", false, "print the ACP JSON-RPC trace to standard error")
+	resume  = appFlags.String("resume", "", "resume an existing session by its `UUID` instead of creating a new one")
+	noFS    = appFlags.Bool("no-fs", false, "disable ACP filesystem support;\nthe agent will not be able to read or write files through Acme")
+	configs []string
+)
+
+func init() {
+	appFlags.Func("config", "set a session configuration option at startup as `id=value`;\nmay be repeated; the option id and available values are those\nshown by the Config command", func(s string) error {
 		configs = append(configs, s)
 		return nil
 	})
-	flag.Parse()
-	if flag.NArg() < 1 {
-		flag.Usage()
+}
+
+func main() {
+	appFlags.Usage = func() {
+		fmt.Fprint(os.Stderr, usageText())
+	}
+	if err := appFlags.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
 	}
-	if err := acmeclient.Run(context.Background(), flag.Args(), *trace, *resume, *noFS, configs); err != nil {
+	if appFlags.NArg() < 1 {
+		appFlags.Usage()
+		os.Exit(2)
+	}
+	if err := acmeclient.Run(context.Background(), appFlags.Args(), *trace, *resume, *noFS, configs); err != nil {
 		fmt.Fprintln(os.Stderr, "acme-acp:", err)
 		os.Exit(1)
 	}

@@ -10,21 +10,6 @@
 //
 //	acme-acp [-rpc.trace] [-resume uuid] [-no-fs] [-config id=value] agent [args...]
 //
-// The flags are:
-//
-//	-config id=value
-//		Set a session configuration option at startup.  May be
-//		repeated.  The option id and available values are those
-//		shown by the Config command (see below).
-//	-no-fs
-//		Disable ACP filesystem support.  The agent will not be
-//		able to read or write files through Acme.
-//	-resume uuid
-//		Resume an existing session by its UUID instead of creating
-//		a new one.
-//	-rpc.trace
-//		Print the ACP JSON-RPC trace to standard error.
-//
 // # Windows
 //
 // On startup, acme-acp creates two windows.
@@ -89,4 +74,18 @@
 // To resume a session manually:
 //
 //	acme-acp -resume UUID agent [args...]
+//
+// Flags:
+//
+//	-config id=value
+//	  	set a session configuration option at startup as id=value;
+//	  	may be repeated; the option id and available values are those
+//	  	shown by the Config command
+//	-no-fs
+//	  	disable ACP filesystem support;
+//	  	the agent will not be able to read or write files through Acme
+//	-resume UUID
+//	  	resume an existing session by its UUID instead of creating a new one
+//	-rpc.trace
+//	  	print the ACP JSON-RPC trace to standard error
 package main
