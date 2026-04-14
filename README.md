@@ -22,12 +22,12 @@ go install github.com/fhs/acme-llm-tools/cmd/acme-mcp@latest
 ## acme-acp
 
 See the [acme-acp documentation](cmd/acme-acp/doc.go) or run
-`go doc github.com/fhs/acme-llm-tools/cmd/acme-acp`.
+[`go doc github.com/fhs/acme-llm-tools/cmd/acme-acp`](https://pkg.go.dev/github.com/fhs/acme-llm-tools/cmd/acme-acp).
 
 ## acme-mcp
 
 See the [acme-mcp documentation](cmd/acme-mcp/doc.go) or run
-`go doc github.com/fhs/acme-llm-tools/cmd/acme-mcp`.
+[`go doc github.com/fhs/acme-llm-tools/cmd/acme-mcp`](https://pkg.go.dev/github.com/fhs/acme-llm-tools/cmd/acme-mcp).
 
 ## Getting Started with Coding Agents
 
